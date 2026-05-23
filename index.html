@@ -4606,16 +4606,14 @@ function mcoSMI(highs, lows, closes) {
 function mcoVWAP(candles, interval) {
   var res=[]; for(var vx=0;vx<candles.length;vx++) res.push(null);
   if(interval==='day') return res;
-  // Anchor to 9:15 AM IST = UTC 3:45 AM = Unix offset 13500 secs from midnight UTC
-  // Since timestamps are stored as Unix (UTC), session start = today's date at 03:45 UTC
-  var now=new Date();
-  var todayUTC=Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate());
-  var sessionStartUnix=(todayUTC/1000)+13500; // 3*3600+45*60 = 13500s = 03:45 UTC = 09:15 IST
-  var cumTPV=0, cumVol=0;
+  // Reset VWAP at each trading day boundary (9:15 AM IST = UTC+5:30)
+  var cumTPV=0, cumVol=0, lastDateKey='';
   for(var vi=0;vi<candles.length;vi++){
     var vc=candles[vi], vt=typeof vc.time==='number'?vc.time:0;
-    // Reset at each new session start
-    if(vt<sessionStartUnix||(vt>=sessionStartUnix+75600)){res[vi]=null;continue;} // 75600=21hrs
+    // Derive IST date key to detect day boundaries
+    var istD=new Date((vt+19800)*1000);
+    var dateKey=istD.getUTCFullYear()+'-'+istD.getUTCMonth()+'-'+istD.getUTCDate();
+    if(dateKey!==lastDateKey){cumTPV=0;cumVol=0;lastDateKey=dateKey;}
     var vtp=(vc.high+vc.low+vc.close)/3, vvol=vc.volume||0;
     cumTPV+=vtp*vvol; cumVol+=vvol;
     res[vi]=cumVol>0?cumTPV/cumVol:null;
@@ -4675,9 +4673,23 @@ function mcoRenderCell(sym, sigObj, interval, cellId) {
       grid:{vertLines:{color:dark?'#2d3248':'#e8eaf0'},horzLines:{color:dark?'#2d3248':'#e8eaf0'}},
       crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
       rightPriceScale:{borderColor:dark?'#2d3248':'#e2e5f0'},
-      timeScale:{borderColor:dark?'#2d3248':'#e2e5f0',timeVisible:interval!=='day',secondsVisible:false},
+      timeScale:{borderColor:dark?'#2d3248':'#e2e5f0',timeVisible:interval!=='day',secondsVisible:false,
+        tickMarkFormatter:function(ut,tickMarkType){
+          var d=new Date((ut+19800)*1000);
+          var h=d.getUTCHours(),m=d.getUTCMinutes();
+          // tickMarkType: 0=Year,1=Month,2=DayOfMonth,3=Time,4=TimeWithSeconds
+          if(tickMarkType===0||tickMarkType===1){
+            var mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            return mo[d.getUTCMonth()]+' '+d.getUTCDate();
+          }
+          if(tickMarkType===2){
+            var dd=d.getUTCDate(),mm=d.getUTCMonth()+1;
+            return (dd<10?'0':'')+dd+'/'+(mm<10?'0':'')+mm;
+          }
+          return (h<10?'0':'')+h+':'+(m<10?'0':'')+m;
+        }
+      },
       localization:{timeFormatter:function(ut){
-        // Display time in IST (UTC+5:30)
         var d=new Date((ut+19800)*1000);
         var h=d.getUTCHours(),m=d.getUTCMinutes();
         return (h<10?'0':'')+h+':'+(m<10?'0':'')+m;
@@ -4705,7 +4717,7 @@ function mcoRenderCell(sym, sigObj, interval, cellId) {
       rightPriceScale:{borderColor:dark?'#2d3248':'#e2e5f0',scaleMargins:{top:0.1,bottom:0.1}},
       timeScale:{borderColor:dark?'#2d3248':'#e2e5f0',visible:false}
     }));
-    var zeroBase=candles.filter(function(_,i){return smiR.smi[i]!==null;}).map(function(c){return{time:c.time,value:0};});
+    var zeroBase=candles.map(function(c){return{time:c.time,value:0};});
     if(zeroBase.length){var zS=smiChart.addLineSeries({color:dark?'#374151':'#d1d5db',lineWidth:1,priceLineVisible:false,lastValueVisible:false});zS.setData(zeroBase);}
     [40,-40].forEach(function(lvl){
       if(!zeroBase.length) return;
@@ -4853,6 +4865,10 @@ function mcoOpen() {
       +'<span id="mck_'+cellId+'" style="font-family:var(--mono);font-size:8px;color:var(--text3);min-width:50px">—</span>'
       +'<button class="mco-remove" onclick="mcoRemove(\''+s.symbol+'\',\''+cellId+'\')">✕</button>'
       +'<button style="background:var(--amber);color:#000;border:none;border-radius:4px;padding:2px 8px;font-family:var(--mono);font-size:9px;font-weight:700;cursor:pointer" onclick="mcoZoomOpen(\''+s.symbol+'\',\''+cellId+'\')">⛶ Zoom</button>'
+      +(isBuy
+        ?'<button style="background:var(--bull);color:#fff;border:none;border-radius:4px;padding:2px 8px;font-family:var(--mono);font-size:9px;font-weight:700;cursor:pointer" onclick="showOrderModal(\''+s.symbol+'\',\'BUY\','+(+s.cmp||0)+','+(+s.tp||0)+','+(+s.sl||0)+')">▲ BUY</button>'
+        :'<button style="background:var(--bear);color:#fff;border:none;border-radius:4px;padding:2px 8px;font-family:var(--mono);font-size:9px;font-weight:700;cursor:pointer" onclick="showOrderModal(\''+s.symbol+'\',\'SELL\','+(+s.cmp||0)+','+(+s.tp||0)+','+(+s.sl||0)+')">▼ SELL</button>'
+      )
       +'</div>'
       +'<div class="mco-chart-wrap"><div id="ca_'+cellId+'"><div class="mco-loading">⏳ Loading…</div></div></div>'
       +'</div>';
@@ -4952,6 +4968,11 @@ function mcoZoomOpen(sym, cellId) {
   if(zoomTfSel) zoomTfSel.value=_zoomTf;
 
   document.getElementById('mcoZoom').classList.add('mco-zoom-active');
+  // Show the correct order button based on signal direction
+  var isBuyZoom=(_zoomSigObj&&(_zoomSigObj.signal||'').charAt(0)==='B');
+  var zBuyBtn=document.getElementById('mcoZoomBuyBtn'),zSellBtn=document.getElementById('mcoZoomSellBtn');
+  if(zBuyBtn)  zBuyBtn.style.display =isBuyZoom ?'inline-block':'none';
+  if(zSellBtn) zSellBtn.style.display=!isBuyZoom?'inline-block':'none';
   mcoZoomRender();
 }
 
@@ -5010,7 +5031,21 @@ function mcoZoomRender() {
       grid:{vertLines:{color:dark?'#2d3248':'#e8eaf0'},horzLines:{color:dark?'#2d3248':'#e8eaf0'}},
       crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
       rightPriceScale:{borderColor:dark?'#2d3248':'#e2e5f0'},
-      timeScale:{borderColor:dark?'#2d3248':'#e2e5f0',timeVisible:_zoomTf!=='day',secondsVisible:false},
+      timeScale:{borderColor:dark?'#2d3248':'#e2e5f0',timeVisible:_zoomTf!=='day',secondsVisible:false,
+        tickMarkFormatter:function(ut,tickMarkType){
+          var d=new Date((ut+19800)*1000);
+          var h=d.getUTCHours(),m=d.getUTCMinutes();
+          if(tickMarkType===0||tickMarkType===1){
+            var mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            return mo[d.getUTCMonth()]+' '+d.getUTCDate();
+          }
+          if(tickMarkType===2){
+            var dd=d.getUTCDate(),mm=d.getUTCMonth()+1;
+            return (dd<10?'0':'')+dd+'/'+(mm<10?'0':'')+mm;
+          }
+          return (h<10?'0':'')+h+':'+(m<10?'0':'')+m;
+        }
+      },
       localization:{timeFormatter:function(ut){
         var d=new Date((ut+19800)*1000);
         var h=d.getUTCHours(),m=d.getUTCMinutes();
@@ -5063,7 +5098,7 @@ function mcoZoomRender() {
       timeScale:{borderColor:dark?'#2d3248':'#e2e5f0',visible:false}
     }));
 
-    var zeroBase=candles.filter(function(_,i){return smiR.smi[i]!==null;}).map(function(c){return{time:c.time,value:0};});
+    var zeroBase=candles.map(function(c){return{time:c.time,value:0};});
     if(zeroBase.length){
       var zS=_zoomSmi.addLineSeries({color:dark?'#374151':'#d1d5db',lineWidth:1,priceLineVisible:false,lastValueVisible:false});
       zS.setData(zeroBase);
@@ -5117,6 +5152,8 @@ function mcoZoomClose() {
       <option value="60minute">60 Min</option>
       <option value="day">Daily</option>
     </select>
+    <button id="mcoZoomBuyBtn" style="background:var(--bull);color:#fff;border:none;border-radius:5px;padding:5px 14px;font-family:var(--mono);font-size:11px;font-weight:700;cursor:pointer;display:none" onclick="if(_zoomSigObj)showOrderModal(_zoomSym,'BUY',_zoomSigObj.cmp||0,_zoomSigObj.tp||0,_zoomSigObj.sl||0)">▲ BUY</button>
+    <button id="mcoZoomSellBtn" style="background:var(--bear);color:#fff;border:none;border-radius:5px;padding:5px 14px;font-family:var(--mono);font-size:11px;font-weight:700;cursor:pointer;display:none" onclick="if(_zoomSigObj)showOrderModal(_zoomSym,'SELL',_zoomSigObj.cmp||0,_zoomSigObj.tp||0,_zoomSigObj.sl||0)">▼ SELL</button>
     <div id="mcoZoomLegend">
       <span style="color:#00bcd4">▬ Up Candle</span>
       <span style="color:#555">▬ Down Candle</span>
